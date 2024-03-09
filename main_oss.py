@@ -53,15 +53,60 @@ def test(matcher, dataloader, args=None):
         # Visualize predictions
         if Visualizer.visualize:
             Visualizer.visualize_prediction_batch(batch['support_imgs'], batch['support_masks'],
-                                                  batch['query_img'], batch['query_mask'],
-                                                  pred_mask, batch['class_id'], idx,
-                                                  area_inter[1].float() / area_union[1].float())
+                                                    batch['query_img'], batch['query_mask'],
+                                                    pred_mask, batch['class_id'], idx,
+                                                    area_inter[1].float() / area_union[1].float())
 
     # Write evaluation results
     average_meter.write_result('Test', 0)
     miou, fb_iou, _ = average_meter.compute_iou()
 
     return miou, fb_iou
+
+def predict_masks(matcher, dataloader, args=None):
+    r""" Use Matcher for prediction """
+
+    # Freeze randomness during testing for reproducibility
+    # Follow HSNet
+    utils.fix_randseed(0)
+    # average_meter = AverageMeter(dataloader.dataset)
+    all_masks = []
+    for idx, batch in enumerate(dataloader):
+
+        batch = utils.to_cuda(batch)
+        query_img, query_mask, support_imgs, support_masks = \
+            batch['query_img'], batch['query_mask'], \
+            batch['support_imgs'], batch['support_masks']
+
+        # 1. Matcher prepare references and target
+        matcher.set_reference(support_imgs, support_masks)
+        matcher.set_target(query_img)
+
+        # 2. Predict mask of target
+        pred_mask = matcher.predict()
+        matcher.clear()
+        all_masks.extend(pred_mask)
+
+        assert pred_mask.size() == batch['query_mask'].size(), \
+            'pred {} ori {}'.format(pred_mask.size(), batch['query_mask'].size())
+
+        # 3. Evaluate prediction
+        # area_inter, area_union = Evaluator.classify_prediction(pred_mask.clone(), batch)
+        # average_meter.update(area_inter, area_union, batch['class_id'], loss=None)
+        # average_meter.write_process(idx, len(dataloader), epoch=-1, write_batch_idx=1)
+
+        # Visualize predictions
+        if Visualizer.visualize:
+            Visualizer.visualize_prediction_batch(batch['support_imgs'], batch['support_masks'],
+                                                    batch['query_img'], batch['query_mask'],
+                                                    pred_mask, batch['class_id'], idx,
+                                                    area_inter[1].float() / area_union[1].float())
+
+    # Write evaluation results
+    # average_meter.write_result('Test', 0)
+    # miou, fb_iou, _ = average_meter.compute_iou()
+
+    return all_masks
 
 
 if __name__ == '__main__':
@@ -83,6 +128,8 @@ if __name__ == '__main__':
     parser.add_argument('--visualize', type=int, default=0)
 
     # DINOv2 and SAM parameters
+    parser.add_argument('--model_source', type=str, default="sam") # valid values [sam, hq]
+    parser.add_argument('--inference_mode', type=str, default="test") # valid values [test, prediction]
     parser.add_argument('--dinov2-size', type=str, default="vit_large")
     parser.add_argument('--sam-size', type=str, default="vit_h")
     parser.add_argument('--dinov2-weights', type=str, default="models/dinov2_vitl14_pretrain.pth")
@@ -133,22 +180,38 @@ if __name__ == '__main__':
     Logger.info('# available GPUs: %d' % torch.cuda.device_count())
 
     # Model initialization
-    if not args.use_semantic_sam:
+    if not args.use_semantic_sam and args.model_source == "sam":
         matcher = build_matcher_oss(args)
+    elif args.use_semantic_sam and args.model_source == "hq":
+        from matcher.Matcher_HQSAM import build_matcher_oss as build_matcher_hq_sam_oss
+        matcher = build_matcher_hq_sam_oss(args)
     else:
         from matcher.Matcher_SemanticSAM import build_matcher_oss as build_matcher_semantic_sam_oss
         matcher = build_matcher_semantic_sam_oss(args)
 
     # Helper classes (for testing) initialization
-    Evaluator.initialize()
-    Visualizer.initialize(args.visualize)
+    if args.inference_mode == "test":
+        Evaluator.initialize()
+        Visualizer.initialize(args.visualize)
 
-    # Dataset initialization
-    FSSDataset.initialize(img_size=args.img_size, datapath=args.datapath, use_original_imgsize=args.use_original_imgsize)
-    dataloader_test = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'test', args.nshot)
+        # Dataset initialization
+        FSSDataset.initialize(img_size=args.img_size, datapath=args.datapath, use_original_imgsize=args.use_original_imgsize)
+        dataloader_test = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'test', args.nshot)
 
-    # Test Matcher
-    with torch.no_grad():
-        test_miou, test_fb_iou = test(matcher, dataloader_test, args=args)
-    Logger.info('Fold %d mIoU: %5.2f \t FB-IoU: %5.2f' % (args.fold, test_miou.item(), test_fb_iou.item()))
-    Logger.info('==================== Finished Testing ====================')
+        # Test Matcher
+        with torch.no_grad():
+            test_miou, test_fb_iou = test(matcher, dataloader_test, args=args)
+        Logger.info('Fold %d mIoU: %5.2f \t FB-IoU: %5.2f' % (args.fold, test_miou.item(), test_fb_iou.item()))
+        Logger.info('==================== Finished Testing ====================')
+    else:
+        Visualizer.initialize(args.visualize)
+
+        # Dataset initialization
+        FSSDataset.initialize(img_size=args.img_size, datapath=args.datapath, use_original_imgsize=args.use_original_imgsize)
+        dataloader_test = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'test', args.nshot)
+
+        # Test Matcher
+        with torch.no_grad():
+            all_masks_preds = predict_masks(matcher, dataloader_test, args=args)
+        Logger.info('Fold %d, number of predicted masks: %d' % (args.fold, len(all_masks_preds)))
+        Logger.info('==================== Finished Testing ====================')
