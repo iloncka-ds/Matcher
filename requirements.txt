@@ -13,3 +13,4 @@ omegaconf
 iopath
 numpy==1.22.0
 tqdm==4.64.1
+segment-anything-hq==0.3
